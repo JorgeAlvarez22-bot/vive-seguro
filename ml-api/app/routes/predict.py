@@ -2,22 +2,21 @@
 ViveSeguro MX — Endpoint /predict
 Recibe condiciones del usuario y devuelve probabilidades por tipo de delito.
 """
-
+ 
 import os
 import joblib
 import numpy as np
-import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List
-
+ 
 router = APIRouter()
-
+ 
 # ── Cargar modelo al iniciar la API ─────────────────────────────────────────
 _BASE = os.path.dirname(__file__)
 _MODEL_PATH    = os.path.join(_BASE, "../../model/model.joblib")
 _ENCODER_PATH  = os.path.join(_BASE, "../../model/le_dominio.joblib")
-
+ 
 try:
     MODEL_BUNDLE  = joblib.load(_MODEL_PATH)
     LE_DOMINIO    = joblib.load(_ENCODER_PATH)
@@ -29,11 +28,11 @@ try:
 except FileNotFoundError:
     MODEL_BUNDLE = None
     MODEL = None
-    print("⚠️  model.joblib no encontrado. Ejecuta scripts/colab_train.py primero.")
-
-
+    print("⚠️  model.joblib no encontrado.")
+ 
+ 
 # ── Esquemas ─────────────────────────────────────────────────────────────────
-
+ 
 class PredictRequest(BaseModel):
     sexo: int = Field(..., description="1 = Hombre, 2 = Mujer", ge=1, le=2)
     edad: int = Field(..., description="Edad en años", ge=1, le=110)
@@ -46,27 +45,27 @@ class PredictRequest(BaseModel):
     mes: int = Field(..., description="Mes 1-12, 99=No especificado", ge=1)
     hora: int = Field(..., description="1=Madrugada 2=Mañana 3=Tarde 4=Noche 9=NS")
     lugar: int = Field(..., description="Lugar de ocurrencia (1-9)", ge=1, le=9)
-
+ 
 class DelitoRiesgo(BaseModel):
     codigo: int
     delito: str
     probabilidad: float
     porcentaje: str
-
+ 
 class PredictResponse(BaseModel):
     mensaje: str
     prediccion_principal: DelitoRiesgo
     top_5_riesgos: List[DelitoRiesgo]
     todos_los_riesgos: List[DelitoRiesgo]
-
-
+ 
+ 
 # ── Endpoint principal ───────────────────────────────────────────────────────
-
+ 
 @router.post("/predict", response_model=PredictResponse)
 def predict(data: PredictRequest):
     if MODEL is None:
         raise HTTPException(status_code=503, detail="Modelo no disponible.")
-
+ 
     # Codificar Dominio igual que en entrenamiento
     try:
         dominio_enc = int(LE_DOMINIO.transform([data.dominio.upper()])[0])
@@ -75,30 +74,30 @@ def predict(data: PredictRequest):
             status_code=422,
             detail=f"Dominio inválido: '{data.dominio}'. Usa 'U', 'C' o 'R'."
         )
-
-    # Construir DataFrame con el mismo orden de columnas que en entrenamiento
-    row = pd.DataFrame([{
-        "Sexo": data.sexo,
-        "Edad": data.edad,
-        "Entidad de ocurrencia del delito": data.entidad,
-        "Municipio de ocurrencia del delito": data.municipio,
-        "Clave_Estado_Municipio": data.clave_estado_municipio,
-        "Área urbana de interés de ocurrencia del delito": data.area_urbana,
-        "Dominio": dominio_enc,
-        "Estrato sociodemográfico": data.estrato,
-        "Mes de ocurrencia del delito": data.mes,
-        "Hora aproximada de ocurrencia del delito": data.hora,
-        "Lugar de ocurrencia del delito": data.lugar,
-    }])[FEATURE_COLS]
-
+ 
+    # Construir vector numpy con el mismo orden de columnas que en entrenamiento
+    row = np.array([[
+        data.sexo,
+        data.edad,
+        data.entidad,
+        data.municipio,
+        data.clave_estado_municipio,
+        data.area_urbana,
+        dominio_enc,
+        data.estrato,
+        data.mes,
+        data.hora,
+        data.lugar,
+    ]], dtype=float)
+ 
     # Predicción con probabilidades
     probas  = MODEL.predict_proba(row)[0]
-    classes = MODEL.classes_  # 0-14
-
+    classes = MODEL.classes_
+ 
     # Construir lista ordenada de mayor a menor probabilidad
     riesgos = []
     for clase_idx, prob in sorted(zip(classes, probas), key=lambda x: x[1], reverse=True):
-        codigo = int(clase_idx) + Y_OFFSET          # convertir 0-index → 1-15
+        codigo = int(clase_idx) + Y_OFFSET
         nombre = DELITOS_MAP.get(codigo, f"Delito código {codigo}")
         riesgos.append(DelitoRiesgo(
             codigo=codigo,
@@ -106,27 +105,25 @@ def predict(data: PredictRequest):
             probabilidad=round(float(prob), 4),
             porcentaje=f"{prob * 100:.1f}%",
         ))
-
+ 
     principal = riesgos[0]
-    sexo_str  = "Hombre" if data.sexo == 1 else "Mujer"
-    mensaje   = (
+    mensaje = (
         f"Dadas tus condiciones actuales, tienes un {principal.porcentaje} de "
         f"probabilidad de ser víctima de: {principal.delito}."
     )
-
+ 
     return PredictResponse(
         mensaje=mensaje,
         prediccion_principal=principal,
         top_5_riesgos=riesgos[:5],
         todos_los_riesgos=riesgos,
     )
-
-
+ 
+ 
 # ── Catálogos para el formulario del frontend ────────────────────────────────
-
+ 
 @router.get("/catalogos")
 def catalogos():
-    """Devuelve todos los valores válidos para poblar el formulario."""
     return {
         "sexo":   {"1": "Hombre", "2": "Mujer"},
         "hora":   {
